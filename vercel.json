@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 2,
+  "buildCommand": "pnpm -r --filter ./lib/db --filter ./artifacts/api-server --filter ./artifacts/carboneye run build && cp -r artifacts/carboneye/dist/public/. public/ && pnpm --filter ./lib/db run migrate:deploy",
+  "outputDirectory": "public",
+  "installCommand": "pnpm install --frozen-lockfile",
+  "framework": null,
+  "functions": {
+    "api/**/*.ts": {
+      "runtime": "@vercel/node@5.1.0",
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "rewrites": [
+    { "source": "/api/webhooks/stripe", "destination": "/api/webhooks/stripe" },
+    { "source": "/api/cron/(.*)", "destination": "/api/cron/$1" },
+    { "source": "/api/(.*)", "destination": "/api/index" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

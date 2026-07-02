@@ -1,0 +1,616 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: analyze
+    description: CarbonEYE analysis operations
+  - name: certificate-requests
+    description: Certificate request lifecycle (human-in-the-loop approval flow)
+  - name: admin
+    description: Admin-only operations — requires X-Admin-Secret header
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /analyze:
+    post:
+      operationId: analyzeCompany
+      tags: [analyze]
+      summary: Analyze a company
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzeRequest"
+      responses:
+        "200":
+          description: Analysis completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyzeResponse"
+        "400":
+          description: Invalid request
+        "401":
+          description: Authentication required
+        "424":
+          description: Data source unavailable
+        "429":
+          description: Rate limited
+        "502":
+          description: Upstream failure
+        "504":
+          description: Upstream timeout
+
+  # ---------------------------------------------------------------------------
+  # Certificate request workflow — user-facing endpoints
+  # ---------------------------------------------------------------------------
+  /certificate-requests:
+    post:
+      operationId: submitCertificateRequest
+      tags: [certificate-requests]
+      summary: Submit a certificate request
+      description: >
+        Creates a new certificate request in "submitted" state.
+        The request is queued for admin review — the pipeline does NOT run
+        automatically. The company should poll GET /certificate-requests/{requestId}
+        to track status changes through the human-in-the-loop approval flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitCertificateRequestBody"
+      responses:
+        "202":
+          description: Request accepted — queued for admin review
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmitCertificateRequestResponse"
+        "400":
+          description: Validation error in the request body
+        "429":
+          description: Rate limit exceeded
+
+  /certificate-requests/{requestId}:
+    get:
+      operationId: getCertificateRequest
+      tags: [certificate-requests]
+      summary: Get a certificate request by ID
+      description: >
+        Returns the full certificate request object. Companies use this endpoint
+        to poll for status updates. Fields like esg_score and pdf_blob_name are
+        only populated once the admin has triggered and approved the pipeline.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The request_id returned by POST /certificate-requests
+      responses:
+        "200":
+          description: Certificate request object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CertificateRequest"
+        "404":
+          description: Request not found
+
+  # ---------------------------------------------------------------------------
+  # Certificate request workflow — admin-only endpoints
+  # All admin endpoints require X-Admin-Secret header for authentication.
+  # ---------------------------------------------------------------------------
+  /admin/certificate-requests:
+    get:
+      operationId: adminListRequests
+      tags: [admin]
+      summary: List all certificate requests (admin only)
+      description: >
+        Returns all certificate requests, newest first. Used by the admin dashboard
+        to show pending requests awaiting analysis or approval.
+        Requires X-Admin-Secret header.
+      parameters:
+        - name: X-Admin-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Admin shared secret for authentication
+      responses:
+        "200":
+          description: Array of all certificate requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CertificateRequest"
+        "401":
+          description: Missing or invalid X-Admin-Secret header
+
+  /admin/certificate-requests/{requestId}/analyze:
+    post:
+      operationId: adminTriggerAnalysis
+      tags: [admin]
+      summary: Trigger pipeline analysis for a request (admin only)
+      description: >
+        Triggers the full CarbonEYE pipeline (ingestion → processing → ai → certificate)
+        for the given request. Moves status from "submitted" to "analyzing".
+        When complete, status moves to "pending_approval" and the admin can
+        review the draft certificate before approving or rejecting.
+        Requires X-Admin-Secret header.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The request_id of the request to analyse
+        - name: X-Admin-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Admin shared secret for authentication
+      responses:
+        "202":
+          description: Analysis pipeline triggered successfully
+        "400":
+          description: Request is not in a state that allows triggering analysis
+        "401":
+          description: Missing or invalid X-Admin-Secret header
+        "404":
+          description: Request not found
+
+  /admin/certificate-requests/{requestId}/approve:
+    post:
+      operationId: adminApproveRequest
+      tags: [admin]
+      summary: Approve a certificate request (admin only)
+      description: >
+        Marks the certificate request as "approved". The certificate immediately
+        becomes visible to the requesting company. An optional admin_note can be
+        included in the request body and will be surfaced to the company.
+        Requires X-Admin-Secret header.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The request_id to approve
+        - name: X-Admin-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Admin shared secret for authentication
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminApproveBody"
+      responses:
+        "200":
+          description: Request approved successfully
+        "400":
+          description: Request is not in "pending_approval" state
+        "401":
+          description: Missing or invalid X-Admin-Secret header
+        "404":
+          description: Request not found
+
+  /admin/certificate-requests/{requestId}/reject:
+    post:
+      operationId: adminRejectRequest
+      tags: [admin]
+      summary: Reject a certificate request (admin only)
+      description: >
+        Marks the certificate request as "rejected" and records the reason.
+        The rejection_reason is surfaced to the requesting company via
+        GET /certificate-requests/{requestId}. This is a terminal state.
+        Requires X-Admin-Secret header.
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The request_id to reject
+        - name: X-Admin-Secret
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Admin shared secret for authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminRejectBody"
+      responses:
+        "200":
+          description: Request rejected successfully
+        "400":
+          description: Request is not in a state that allows rejection
+        "401":
+          description: Missing or invalid X-Admin-Secret header
+        "404":
+          description: Request not found
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    AnalyzeRequest:
+      type: object
+      properties:
+        company_name:
+          type: string
+          minLength: 1
+        lat:
+          type: number
+        lon:
+          type: number
+      required:
+        - company_name
+        - lat
+        - lon
+    Anomaly:
+      type: object
+      properties:
+        code:
+          type: string
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+        description:
+          type: string
+      required:
+        - code
+        - severity
+        - description
+    Compliance:
+      type: object
+      properties:
+        csrd_2026:
+          type: string
+        eu_taxonomy:
+          type: string
+        esrs_e1:
+          type: string
+      required:
+        - csrd_2026
+        - eu_taxonomy
+        - esrs_e1
+    DataSource:
+      type: object
+      properties:
+        source:
+          type: string
+          enum: [sentinel-2, sentinel-5p, iot, weather]
+        status:
+          type: string
+          enum: [ok, stale, missing, failed]
+        last_updated:
+          type: string
+          format: date-time
+      required:
+        - source
+        - status
+        - last_updated
+    MonitoringPeriod:
+      type: object
+      properties:
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+      required:
+        - start
+        - end
+    AnalyzeResponse:
+      type: object
+      properties:
+        submission_id:
+          type: integer
+        esg_score:
+          type: number
+        esg_grade:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        ndvi_mean:
+          type: number
+        ndwi_mean:
+          type: number
+        nbr_mean:
+          type: number
+        ch4_ppb:
+          type: number
+        co2_ppm:
+          type: number
+        iot_co2_mean:
+          type: number
+        iot_ch4_mean:
+          type: number
+        iot_temperature_mean:
+          type: number
+        iot_humidity_mean:
+          type: number
+        num_iot_sensors:
+          type: number
+        anomalies:
+          type: array
+          items:
+            $ref: "#/components/schemas/Anomaly"
+        compliance:
+          $ref: "#/components/schemas/Compliance"
+        data_sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/DataSource"
+        data_hash:
+          type: string
+        pdf_sha256:
+          type: string
+        verified_emissions_tco2eq:
+          type: number
+        monitoring_period:
+          $ref: "#/components/schemas/MonitoringPeriod"
+        certificate_id:
+          type: string
+
+    # -------------------------------------------------------------------------
+    # Certificate request workflow schemas
+    # -------------------------------------------------------------------------
+
+    RequestStatus:
+      type: string
+      description: >
+        Lifecycle state of a certificate request. The state machine is:
+        submitted → analyzing → pending_approval → approved | rejected.
+        Terminal states (approved / rejected) are immutable.
+      enum:
+        - submitted
+        - analyzing
+        - pending_approval
+        - approved
+        - rejected
+
+    Coordinates:
+      type: object
+      description: Geographic coordinates in decimal degrees (WGS-84).
+      properties:
+        lat:
+          type: number
+          minimum: -90
+          maximum: 90
+          description: Latitude in decimal degrees
+        lon:
+          type: number
+          minimum: -180
+          maximum: 180
+          description: Longitude in decimal degrees
+      required:
+        - lat
+        - lon
+
+    DateRange:
+      type: object
+      description: Analysis window for the certificate — ISO 8601 date strings.
+      properties:
+        start:
+          type: string
+          format: date
+          description: Start of the analysis window (inclusive), YYYY-MM-DD
+        end:
+          type: string
+          format: date
+          description: End of the analysis window (inclusive), YYYY-MM-DD
+      required:
+        - start
+        - end
+
+    CertificateRequest:
+      type: object
+      description: >
+        A certificate request as stored in Cosmos DB.
+        Fields are populated progressively as the request moves through the
+        human-in-the-loop approval workflow.
+      properties:
+        id:
+          type: string
+          description: Cosmos partition key — same value as request_id
+        request_id:
+          type: string
+          description: "Human-readable request ID, format: REQ-YYYY-XXXXXXXX"
+        company_name:
+          type: string
+          description: Legal name of the company requesting the certificate
+        coordinates:
+          $ref: "#/components/schemas/Coordinates"
+        date_range:
+          $ref: "#/components/schemas/DateRange"
+        period_days:
+          type: integer
+          minimum: 7
+          maximum: 365
+          description: Historical rolling window in days (default 90)
+        submitted_at:
+          type: string
+          format: date-time
+          description: ISO datetime when the user submitted the request
+        status:
+          $ref: "#/components/schemas/RequestStatus"
+        # Fields populated after the admin triggers the pipeline
+        analysis_started_at:
+          type: string
+          format: date-time
+          description: ISO datetime the pipeline started (set when status → analyzing)
+        analysis_finished_at:
+          type: string
+          format: date-time
+          description: ISO datetime the pipeline completed (set when status → pending_approval)
+        certificate_id:
+          type: string
+          description: "Draft certificate ID, format: CEYE-YYYY-XXXXXXXX"
+        esg_score:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Computed ESG score in range 0–100
+        esg_grade:
+          type: string
+          description: "Letter grade: A, A-, B+, B, C+, C, D, F"
+        anomalies_count:
+          type: integer
+          minimum: 0
+          description: Number of emission anomalies detected by the pipeline
+        greenwashing_risk:
+          type: string
+          enum: [low, medium, high]
+          description: Derived risk level based on anomalies and ESG score
+        pdf_blob_name:
+          type: string
+          description: Azure Blob name for the PDF; build download URL from this
+        data_hash:
+          type: string
+          description: SHA-256 of the canonical source payload (load-bearing integrity hash)
+        # Fields populated after the admin approves or rejects
+        admin_action_at:
+          type: string
+          format: date-time
+          description: ISO datetime of the admin action (approve or reject)
+        admin_note:
+          type: string
+          description: Optional note from admin, visible to the company on approval
+        rejection_reason:
+          type: string
+          description: Required reason when admin rejects, visible to the company
+      required:
+        - id
+        - request_id
+        - company_name
+        - coordinates
+        - date_range
+        - period_days
+        - submitted_at
+        - status
+
+    SubmitCertificateRequestBody:
+      type: object
+      description: Request body for POST /certificate-requests.
+      properties:
+        company_name:
+          type: string
+          minLength: 1
+          description: Legal name of the requesting company
+        coordinates:
+          $ref: "#/components/schemas/Coordinates"
+        date_range:
+          $ref: "#/components/schemas/DateRange"
+        period_days:
+          type: integer
+          minimum: 7
+          maximum: 365
+          description: Historical rolling window in days; defaults to 90 if omitted
+      required:
+        - company_name
+        - coordinates
+        - date_range
+
+    SubmitCertificateRequestResponse:
+      type: object
+      description: >
+        Success response from POST /certificate-requests (HTTP 202 Accepted).
+        Use request_id to poll GET /certificate-requests/{request_id} for updates.
+      properties:
+        request_id:
+          type: string
+          description: Permanent ID for all subsequent polling calls
+        status:
+          type: string
+          enum: [submitted]
+          description: Always "submitted" immediately after creation
+        message:
+          type: string
+          description: Human-readable confirmation message
+        submitted_at:
+          type: string
+          format: date-time
+          description: ISO datetime of submission (for display in the portal)
+      required:
+        - request_id
+        - status
+        - message
+        - submitted_at
+
+    AdminApproveBody:
+      type: object
+      description: Optional body for POST /admin/certificate-requests/{requestId}/approve.
+      properties:
+        note:
+          type: string
+          description: Optional admin note; surfaced to the company on approval
+
+    AdminRejectBody:
+      type: object
+      description: Required body for POST /admin/certificate-requests/{requestId}/reject.
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          description: Required human-readable reason for rejection; surfaced to the company
+      required:
+        - reason
+        pdf_blob_url:
+          type: string
+        blockchain_hash:
+          type: string
+        methodology:
+          type: string
+      required:
+        - submission_id
+        - esg_score
+        - esg_grade
+        - timestamp
+        - anomalies
+        - compliance
+        - data_sources
+        - data_hash
+        - verified_emissions_tco2eq
+        - monitoring_period
+        - certificate_id
