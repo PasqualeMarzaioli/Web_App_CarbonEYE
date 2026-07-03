@@ -88,10 +88,3 @@ SESSION_SECRET=         # Random string for auth sessions
 AZURE_FUNCTIONS_URL=    # URL of the Python Pipeline (Azure)
 AZURE_FUNCTIONS_KEY=    # API Key for Azure Functions
 ```
-
----
-
-## License
-
-Copyright © 2026 CarbonEYE. All rights reserved.
-Proprietary and Confidential.
